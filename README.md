@@ -19,5 +19,5 @@ docker build -t proxyany .
 
 ## Docker Run
 ```shell
-docker run -p 10230:10230 proxyany
+docker run -d -p 10230:10230 --restart=unless-stopped --name ProxyAny proxyany
 ```
