@@ -52,7 +52,7 @@ func getChunkSize() int {
 			return size
 		}
 	}
-	return 256 * 1024
+	return 1024 * 1024
 }
 
 func main() {
