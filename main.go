@@ -4,16 +4,20 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 var (
 	sizeLimit int64 = 1024 * 1024 * 1024 * 999 // 999GB
-	chunkSize       = 10 * 1024
+	chunkSize       = getChunkSize()
 
 	allowedDomainsMutex sync.RWMutex
 	allowedDomains      = []string{
@@ -37,13 +41,60 @@ var (
 		"pypi.org",
 		"files.pythonhosted.org",
 	}
+
+	httpClient *http.Client
+	clientOnce sync.Once
 )
 
+func getChunkSize() int {
+	if sizeStr := os.Getenv("PROXY_CHUNK_SIZE"); sizeStr != "" {
+		if size, err := strconv.Atoi(sizeStr); err == nil && size > 0 {
+			return size
+		}
+	}
+	return 256 * 1024
+}
+
 func main() {
-	http.HandleFunc("/", indexOrProxy)
-	addr := "0.0.0.0:10230"
-	log.Println("listen on", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	initHTTPClient()
+
+	server := &http.Server{
+		Addr:         "0.0.0.0:10230",
+		Handler:      http.HandlerFunc(indexOrProxy),
+		ReadTimeout:  300 * time.Second,
+		WriteTimeout: 300 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
+
+	log.Println("listen on", server.Addr)
+	log.Fatal(server.ListenAndServe())
+}
+
+func initHTTPClient() {
+	clientOnce.Do(func() {
+		httpClient = &http.Client{
+			Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				DisableCompression:    true,
+				ForceAttemptHTTP2:     true,
+				DisableKeepAlives:     false,
+				MaxIdleConnsPerHost:   100,
+				MaxIdleConns:          1000,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+				ResponseHeaderTimeout: 30 * time.Second,
+				DialContext: (&net.Dialer{
+					Timeout:   30 * time.Second,
+					KeepAlive: 30 * time.Second,
+				}).DialContext,
+			},
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+			Timeout: 300 * time.Second,
+		}
+	})
 }
 
 func indexOrProxy(w http.ResponseWriter, r *http.Request) {
@@ -174,20 +225,7 @@ func proxy(w http.ResponseWriter, r *http.Request, base string) {
 		}
 	}
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy:               http.ProxyFromEnvironment,
-			DisableCompression:  true,
-			ForceAttemptHTTP2:   true,
-			DisableKeepAlives:   false,
-			MaxIdleConnsPerHost: 10,
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		http.Error(w, "server error "+err.Error(), 500)
 		return
@@ -246,20 +284,8 @@ func handleDockerRegistry(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy:               http.ProxyFromEnvironment,
-			DisableCompression:  true,
-			ForceAttemptHTTP2:   true,
-			DisableKeepAlives:   false,
-			MaxIdleConnsPerHost: 10,
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	resp, err := client.Do(req)
+	// 使用全局优化的HTTP客户端
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		http.Error(w, "server error "+err.Error(), 500)
 		return
@@ -322,20 +348,7 @@ func handleDockerAuth(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	client := &http.Client{
-		Transport: &http.Transport{
-			Proxy:               http.ProxyFromEnvironment,
-			DisableCompression:  true,
-			ForceAttemptHTTP2:   true,
-			DisableKeepAlives:   false,
-			MaxIdleConnsPerHost: 10,
-		},
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-
-	resp, err := client.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		http.Error(w, "server error "+err.Error(), 500)
 		return
